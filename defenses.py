@@ -613,29 +613,65 @@ def _convert_defense_results(flat_results: dict) -> dict:
  
 # ── Coller ce bloc à la place de l'ancien bloc de sauvegarde dans run() ────────
  
+# ══════════════════════════════════════════════════════════════
+# SAUVEGARDE JSON 
+# ══════════════════════════════════════════════════════════════
+
+LABEL_MAP = {
+    "MLP baseline":            ("MLP",     "Baseline"),
+    "MLP AT-FGSM":             ("MLP",     "AT-FGSM"),
+    "MLP AT-PGD10":            ("MLP",     "AT-PGD"),
+    "LogReg baseline":         ("LogReg",  "Baseline"),
+    "LogReg Aug-FGSM":         ("LogReg",  "Aug-FGSM"),
+    "LogReg Aug-PGD":          ("LogReg",  "Aug-PGD"),
+    "XGBoost baseline":        ("XGBoost", "Baseline"),
+    "XGBoost Aug-proxy-FGSM":  ("XGBoost", "Aug-proxy"),
+    "XGBoost Aug-direct-FGSM": ("XGBoost", "Aug-direct"),
+}
+
+EVAL_ATTACKS = ["FGSM", "PGD", "C&W"]
+
+
+def _convert_defense_results(flat_results: dict) -> dict:
+    out = {}
+    for label, metrics in flat_results.items():
+        mapping = LABEL_MAP.get(label, (None, None))
+        model, defense = mapping
+        if model is None:
+            continue
+
+        out.setdefault(model, {}).setdefault(defense, {})
+        f1_clean = metrics.get("f1_clean")
+
+        for att in EVAL_ATTACKS:
+            asr = metrics.get(att)
+            if asr is None:
+                continue
+            out[model][defense][att] = {
+                "evasion_rate": round(asr * 100, 2),
+                "f1":           round(f1_clean, 4) if f1_clean is not None else None,
+                "recall":       round(1.0 - asr, 4),
+                "delta_f1":     None,
+            }
+    return out
+
+
 def _save_defense_results(flat_results: dict, results_dir):
-    """
-    Sauvegarde defense_results.json (lu par dashboard.py)
-    ET defense_whitebox_results.json (format plat de debug).
-    """
     import json
     from pathlib import Path
     results_dir = Path(results_dir).expanduser()
     results_dir.mkdir(parents=True, exist_ok=True)
- 
-    # Format hiérarchique pour le dashboard
+
     hier = _convert_defense_results(flat_results)
     out_path = results_dir / "defense_results.json"
     with open(out_path, "w") as f:
         json.dump(hier, f, indent=2)
     print(f"\n  defense_results.json sauvegardé → {out_path}")
- 
-    # Format plat pour debug / article
+
     flat_path = results_dir / "defense_whitebox_results.json"
     with open(flat_path, "w") as f:
         json.dump(flat_results, f, indent=2)
     print(f"  defense_whitebox_results.json sauvegardé → {flat_path}")
-
 # ══════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════
