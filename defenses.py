@@ -581,6 +581,60 @@ def evaluate_defended_models(defended_models, X_test, y_test, eps=0.3):
     print(f"  {'─'*70}")
     return results
 
+def _convert_defense_results(flat_results: dict) -> dict:
+    """
+    Convertit la sortie plate de evaluate_defended_models()
+    vers la structure hiérarchique attendue par dashboard.py.
+ 
+    flat_results : {label: {"f1_clean": float, "FGSM": float, "PGD": float, "C&W": float}}
+    retourne     : {model: {defense: {attack: {"evasion_rate": %, "f1": float, "recall": None}}}}
+    """
+    out = {}
+    for label, metrics in flat_results.items():
+        model, defense = LABEL_MAP.get(label, (None, None))
+        if model is None:
+            continue
+ 
+        out.setdefault(model, {}).setdefault(defense, {})
+        f1_clean = metrics.get("f1_clean")
+ 
+        for att in EVAL_ATTACKS:
+            asr = metrics.get(att)          # fraction [0,1]
+            if asr is None:
+                continue
+            out[model][defense][att] = {
+                "evasion_rate": round(asr * 100, 2),   # → % pour cohérence avec whitebox_results
+                "f1":           round(f1_clean, 4) if f1_clean is not None else None,
+                "recall":       round(1.0 - asr, 4),   # approximation : recall ≈ 1 - ASR
+                "delta_f1":     None,                   # non calculé ici, peut être enrichi
+            }
+    return out
+ 
+ 
+# ── Coller ce bloc à la place de l'ancien bloc de sauvegarde dans run() ────────
+ 
+def _save_defense_results(flat_results: dict, results_dir):
+    """
+    Sauvegarde defense_results.json (lu par dashboard.py)
+    ET defense_whitebox_results.json (format plat de debug).
+    """
+    import json
+    from pathlib import Path
+    results_dir = Path(results_dir).expanduser()
+    results_dir.mkdir(parents=True, exist_ok=True)
+ 
+    # Format hiérarchique pour le dashboard
+    hier = _convert_defense_results(flat_results)
+    out_path = results_dir / "defense_results.json"
+    with open(out_path, "w") as f:
+        json.dump(hier, f, indent=2)
+    print(f"\n  defense_results.json sauvegardé → {out_path}")
+ 
+    # Format plat pour debug / article
+    flat_path = results_dir / "defense_whitebox_results.json"
+    with open(flat_path, "w") as f:
+        json.dump(flat_results, f, indent=2)
+    print(f"  defense_whitebox_results.json sauvegardé → {flat_path}")
 
 # ══════════════════════════════════════════════════════════════
 # MAIN
@@ -649,10 +703,7 @@ def run():
     import json
     RESULTS_DIR = Path("~/swat/results").expanduser()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / "defense_whitebox_results.json"
-    with open(out_path, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\n  Résultats sauvegardés → {out_path}")
+    _save_defense_results(results, RESULTS_DIR)
 
     print("\n" + "═"*60)
     print("  DONE — artéfacts sauvegardés dans ~/swat/artifacts/")
