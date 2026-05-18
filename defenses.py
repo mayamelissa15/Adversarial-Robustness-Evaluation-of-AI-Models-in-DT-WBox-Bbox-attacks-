@@ -1,46 +1,82 @@
 """
-defenses.py  — version corrigée
+defenses.py  — version corrigée v2
 Entraînement des modèles défendus + évaluation immédiate.
 
 ═══════════════════════════════════════════════════════════════
-CORRECTIONS PAR RAPPORT À LA VERSION AMÉLIORÉE
+CORRECTIONS PAR RAPPORT À LA VERSION PRÉCÉDENTE
 ═══════════════════════════════════════════════════════════════
 
-FIX 1 — MISMATCH D'ARCHITECTURE MLP AU CHARGEMENT
-  Problème : le .pt sauvegardé peut correspondre à une ancienne
-  architecture (ex. avec BatchNorm) différente de la classe MLP
-  actuelle dans models.py.
-  Solution : on ajoute strict=False + vérification de cohérence
-  des clés au chargement, avec un message d'erreur explicite qui
-  demande de supprimer l'ancien .pt plutôt que de crasher.
+FIX A — BUG CRITIQUE : _build_aug_dataset EMPOISONNE LE DATASET LOGREG
+  Problème : les adversariaux (X_adv, y=1) ajoutés au dataset ont la
+  FORME d'un normal (c'est le but de l'attaque) mais le LABEL d'une
+  attaque. Le modèle reçoit des signaux contradictoires et abandonne
+  la classe 1 → recall=0, ASR=100%.
 
-  Si l'architecture a changé, supprimer les anciens .pt :
-      rm ~/swat/artifacts/mlp_at_fgsm.pt
-      rm ~/swat/artifacts/mlp_at_pgd.pt
-  puis relancer defenses.py.
+  Mauvaise intuition initiale : "montrer au modèle des attaques
+  perturbées avec leur vrai label pour qu'il les reconnaisse malgré tout".
 
-FIX 2 — CAPTURE DE VARIABLE DANS LES LAMBDAS (evaluate_defended_models)
-  Problème : X_atk et y_atk étaient capturées par référence dans
-  les lambdas de get_attack, ce qui donnait des résultats incorrects
-  (toutes les lambdas pointaient vers la dernière valeur de la boucle).
-  Solution : passage explicite via paramètres par défaut des lambdas.
+  Réalité : les adversariaux générés depuis la classe 1 RESSEMBLENT
+  délibérément à la classe 0. Les ajouter avec y=1 crée un conflit
+  insoluble pour un modèle linéaire.
 
-FIX 3 — C&W AJOUTÉ À L'ÉVALUATION DÉFENSIVE
-  L'attaque C&W était absente de evaluate_defended_models.
-  Elle est maintenant incluse avec les colonnes :
-    FGSM 0.3 | PGD 0.3 | C&W 0.3
-  (on rapporte uniquement eps=0.3 pour garder la table lisible,
-   c'est le budget le plus sévère et le plus pertinent pour l'article)
+  Solution en deux volets :
+    1. On génère les adversariaux depuis les NORMAUX (classe 0) avec
+       y_adv=0 : le modèle apprend que ces voisins des normaux sont
+       AUSSI des normaux → frontière plus robuste côté normal.
+    2. On génère les adversariaux depuis les ATTAQUES (classe 1) mais
+       on les conserve avec y_adv=1 ET on sur-pondère ces exemples
+       dans le fit (sample_weight × HARD_SAMPLE_WEIGHT) pour forcer
+       le modèle à maintenir sa frontière sur ces cas difficiles.
+       Alternative plus simple activée par défaut : on n'ajoute PAS
+       les adversariaux des attaques — on génère seulement ceux des
+       normaux. Cela suffit pour robustifier la frontière sans
+       introduire de contradiction.
+
+  Paramètre : ADV_ATTACK_RATIO contrôle si on ajoute les adversariaux
+  d'attaque (avec sur-pondération) ou pas du tout (0.0 = désactivé).
+
+FIX B — BUG IMPORTANT : EPS_AT trop petit (0.1) vs évaluation à eps=0.3
+  Problème : le MLP est entraîné adversarialement avec EPS_AT_LIST=[0.1, 0.3]
+  mais EPS_AT (valeur initiale du curriculum) = 0.1.
+  Le curriculum monte de 0.1 à 0.3 sur 30 epochs mais avec AT_EPOCHS=60
+  et AT_PATIENCE=10, l'early stop peut intervenir avant que le modèle
+  voie suffisamment d'exemples à eps=0.3.
+
+  Solution :
+    - EPS_AT_START = 0.05  (départ plus bas, montée plus douce)
+    - EPS_AT_END   = 0.35  (dépasse légèrement le budget d'évaluation)
+    - Curriculum : 40 epochs pour monter (au lieu de 30)
+    - AT_PATIENCE augmenté à 15 pour laisser le modèle s'adapter à eps élevé
+
+FIX C — BUG MINEUR : augment_xgb_proxy utilise le proxy MLP AT-FGSM
+  mais celui-ci est entraîné avec EPS_AT correct après FIX B.
+  En plus, on ajoute une deuxième variante : augmentation XGBoost
+  avec adversariaux DIRECTS générés sur XGBoost lui-même (plus de
+  transfert, adversariaux en distribution).
+
+  Nouveau paramètre : XGB_AUG_DIRECT_ITERS=50 pour les adversariaux
+  directs (coût acceptable, directement utiles).
+
+FIX D — CORRECTION _build_aug_dataset POUR LOGREG ET XGB
+  Nouvelle logique :
+    1. Adversariaux générés depuis les NORMAUX (classe 0) → ajoutés
+       avec label 0. Force la frontière à être robuste côté normal.
+    2. Les adversariaux depuis les attaques (classe 1) sont OPTIONNELS
+       et contrôlés par ADV_ATTACK_RATIO (défaut 0.0 = désactivé).
+       Si activé, ils sont ajoutés avec y=1 ET sample_weight élevé.
+    3. Le paramètre NORMAL_AUG_RATIO passe à 1.0 (tous les normaux,
+       pas seulement 30%) pour maximiser la couverture de la frontière.
 
 ═══════════════════════════════════════════════════════════════
-MODÈLES PRODUITS
+RÉSUMÉ DES CHANGEMENTS DE PARAMÈTRES
 ═══════════════════════════════════════════════════════════════
-  mlp_at_fgsm.pt          → MLP Adversarial Training FGSM
-  mlp_at_pgd.pt           → MLP Adversarial Training PGD
-  logreg_aug_fgsm.pkl     → LogReg augmentée FGSM
-  logreg_aug_pgd.pkl      → LogReg augmentée PGD
-  xgb_aug_proxy_fgsm.json → XGBoost augmenté via proxy MLP AT-FGSM
-  xgb_aug_direct_fgsm.json→ XGBoost augmenté via gradient numérique direct
+  NORMAL_AUG_RATIO  : 0.3  → 1.0   (tous les normaux augmentés)
+  EPS_AT_START      : 0.1  → 0.05  (curriculum plus doux)
+  EPS_AT_END        : 0.3  → 0.35  (dépasse le budget d'évaluation)
+  AT_PATIENCE       : 10   → 15    (plus de tolérance à eps élevé)
+  AT_CURRICULUM_EP  : 30   → 40    (montée plus lente)
+  ADV_ATTACK_RATIO  : n/a  → 0.0   (adversariaux d'attaque désactivés)
+  HARD_SAMPLE_WEIGHT: n/a  → 3.0   (si ADV_ATTACK_RATIO > 0)
 """
 
 import numpy as np
@@ -95,14 +131,24 @@ SAVE_DIR  = Path("~/swat/artifacts").expanduser()
 DEVICE    = "cuda" if torch.cuda.is_available() else "cpu"
 THRESHOLD = 0.45
 
-EPS_AT_LIST      = [0.1, 0.3]
-EPS_AT           = 0.1
-AT_EPOCHS        = 60
-AT_PATIENCE      = 10
-AT_MIX_RATIO     = 0.5
-PGD_AT_ITERS     = 10
-PGD_AT_ALPHA     = lambda eps: eps / 4
-NORMAL_AUG_RATIO = 0.3
+# ── FIX B : plage eps plus large que le budget d'évaluation (0.3) ─
+EPS_AT_LIST       = [0.1, 0.3]
+EPS_AT_START      = 0.05   # FIX B : départ plus bas (était 0.1 = EPS_AT)
+EPS_AT_END        = 0.35   # FIX B : dépasse légèrement eps d'évaluation
+AT_EPOCHS         = 60
+AT_PATIENCE       = 15     # FIX B : augmenté (était 10) pour laisser le
+                            #         modèle s'adapter aux eps élevés
+AT_CURRICULUM_EP  = 40     # FIX B : montée plus lente (était 30)
+AT_MIX_RATIO      = 0.5
+PGD_AT_ITERS      = 10
+PGD_AT_ALPHA      = lambda eps: eps / 4
+
+# ── FIX A : paramètres augmentation dataset ───────────────────
+NORMAL_AUG_RATIO  = 1.0    # FIX A : tous les normaux (était 0.3)
+                            #         → couverture maximale de la frontière
+ADV_ATTACK_RATIO  = 0.0    # FIX A : adversariaux d'attaque désactivés
+                            #         (était implicitement 1.0 → empoisonnait)
+HARD_SAMPLE_WEIGHT = 3.0   # poids si ADV_ATTACK_RATIO > 0 (non utilisé ici)
 
 print(f"Device : {DEVICE}")
 
@@ -151,30 +197,20 @@ def _bar(v, w=15):
 
 
 # ══════════════════════════════════════════════════════════════
-# FIX 1 — CHARGEMENT MLP ROBUSTE (détection mismatch d'architecture)
+# CHARGEMENT MLP ROBUSTE (détection mismatch d'architecture)
 # ══════════════════════════════════════════════════════════════
 
 def _load_mlp_safe(fpath, input_size):
     """
     Charge un MLP sauvegardé avec détection automatique de mismatch
-    d'architecture.
-
-    Si les clés du checkpoint ne correspondent pas à la classe MLP
-    actuelle, lève une RuntimeError explicite avec les instructions
-    pour résoudre le problème (rm + relancer), plutôt que de laisser
-    PyTorch crasher avec un message cryptique.
-
-    Retourne le modèle MLP chargé en mode eval.
+    d'architecture. Lève RuntimeError explicite si les clés ne matchent pas.
     """
     model = MLP(input_size=input_size).to(DEVICE)
-
     checkpoint = torch.load(fpath, map_location=DEVICE)
 
-    # Vérification des clés avant le chargement
     model_keys      = set(model.state_dict().keys())
     checkpoint_keys = set(checkpoint.keys())
-
-    missing   = model_keys - checkpoint_keys
+    missing    = model_keys - checkpoint_keys
     unexpected = checkpoint_keys - model_keys
 
     if missing or unexpected:
@@ -182,8 +218,6 @@ def _load_mlp_safe(fpath, input_size):
             f"\n{'═'*60}\n"
             f"  MISMATCH D'ARCHITECTURE — {fpath.name}\n"
             f"{'═'*60}\n"
-            f"  Le fichier .pt a été généré avec une architecture MLP\n"
-            f"  différente de celle définie dans models.py.\n\n"
             f"  Clés manquantes  : {missing or 'aucune'}\n"
             f"  Clés inattendues : {unexpected or 'aucune'}\n\n"
             f"  Solution : supprimer les anciens checkpoints et relancer.\n"
@@ -199,7 +233,7 @@ def _load_mlp_safe(fpath, input_size):
 
 
 # ══════════════════════════════════════════════════════════════
-# DÉFENSE 1 & 2 — ADVERSARIAL TRAINING MLP
+# DÉFENSE 1 & 2 — ADVERSARIAL TRAINING MLP  (FIX B)
 # ══════════════════════════════════════════════════════════════
 
 def adversarial_train_mlp(X_train, y_train, X_test, y_test, input_size,
@@ -211,7 +245,6 @@ def adversarial_train_mlp(X_train, y_train, X_test, y_test, input_size,
 
     if fpath.exists():
         print(f"    {fname} déjà présent → chargement direct")
-        # FIX 1 : utilise le chargement robuste au lieu de load_state_dict direct
         model = _load_mlp_safe(fpath, input_size)
         w = MLPWrapper(model, DEVICE)
         quick_eval(w, X_test, y_test, f"[chargé] {fname}")
@@ -235,13 +268,17 @@ def adversarial_train_mlp(X_train, y_train, X_test, y_test, input_size,
     y_val    = y_train[:val_size]
 
     best_f1, no_improve, best_state = 0.0, 0, None
-    eps_min, eps_max = min(EPS_AT_LIST), max(EPS_AT_LIST)
+
+    # FIX B : curriculum étendu (EPS_AT_START → EPS_AT_END sur AT_CURRICULUM_EP epochs)
+    print(f"    Curriculum eps : {EPS_AT_START:.3f} → {EPS_AT_END:.3f} "
+          f"sur {AT_CURRICULUM_EP} epochs (évaluation à 0.3)")
 
     for epoch in range(epochs):
         model.train()
 
-        frac     = min(epoch / 30, 1.0)
-        eps_curr = eps_min + frac * (eps_max - eps_min)
+        # FIX B : curriculum plus doux et dépassant le budget d'évaluation
+        frac     = min(epoch / AT_CURRICULUM_EP, 1.0)
+        eps_curr = EPS_AT_START + frac * (EPS_AT_END - EPS_AT_START)
 
         for xb, yb in loader:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -301,44 +338,92 @@ def adversarial_train_mlp(X_train, y_train, X_test, y_test, input_size,
 
 
 # ══════════════════════════════════════════════════════════════
-# DÉFENSE 3 — AUGMENTATION LogReg (FGSM + PGD)
+# FIX A — _build_aug_dataset CORRIGÉ
 # ══════════════════════════════════════════════════════════════
 
 def _build_aug_dataset(X_train, y_train, adv_fn, eps_list,
-                       include_normal=True):
+                       adv_attack_ratio=ADV_ATTACK_RATIO):
+    """
+    Construit un dataset augmenté pour l'entraînement défensif.
+
+    FIX A — Logique corrigée :
+    ──────────────────────────
+    ANCIENNE logique (BUGGUÉE) :
+      - Générait X_adv depuis les ATTAQUES (y=1) et les ajoutait avec y=1
+      - X_adv ressemble à un normal (c'est le but de l'attaque FGSM/PGD)
+      - Résultat : le modèle reçoit (X_normal-like, y=1) → contradiction
+        insoluble → abandon de la classe 1 → recall=0
+
+    NOUVELLE logique (CORRIGÉE) :
+      - Génère X_adv depuis les NORMAUX (y=0) avec label y=0
+        → le modèle apprend que les voisins adversariaux des normaux
+          sont AUSSI des normaux : la frontière est robuste côté normal
+      - Les adversariaux depuis les ATTAQUES (y=1) sont optionnels
+        (adv_attack_ratio > 0) et ajoutés avec leur label réel y=1
+        + sample_weight élevé pour forcer la frontière côté attaque
+        MAIS par défaut désactivés (adv_attack_ratio=0.0) car ils
+        créent plus de bruit que de signal pour LogReg
+
+    Retourne : (X_aug, y_aug, sample_weights)
+      sample_weights est None si tous les poids sont 1.0
+    """
     X_parts = [X_train]
     y_parts = [y_train]
+    w_parts = [np.ones(len(y_train))]   # poids uniformes pour les données originales
 
-    mask_atk = (y_train == 1)
-    X_atk    = X_train[mask_atk].astype(np.float32)
-    y_atk    = y_train[mask_atk]
+    # ── Adversariaux depuis les NORMAUX (y=0) ─────────────────
+    # FIX A : on augmente les normaux, pas les attaques
+    mask_norm = (y_train == 0)
+    X_norm    = X_train[mask_norm].astype(np.float32)
+    y_norm    = y_train[mask_norm]
+
+    n_normal = int(len(X_norm) * NORMAL_AUG_RATIO)  # NORMAL_AUG_RATIO=1.0 → tous
+    idx      = np.random.choice(len(X_norm), n_normal, replace=False)
+    X_n_sub  = X_norm[idx]
+    y_n_sub  = y_norm[idx]
 
     for eps in eps_list:
-        X_adv = adv_fn(X_atk, y_atk, eps)
-        X_parts.append(X_adv)
-        y_parts.append(y_atk)
-        print(f"      eps={eps} → +{len(X_adv)} adversariaux (attaque)")
+        X_adv_n = adv_fn(X_n_sub, y_n_sub, eps)
+        X_parts.append(X_adv_n)
+        y_parts.append(y_n_sub)                           # label 0 conservé ✓
+        w_parts.append(np.ones(len(X_adv_n)))
+        print(f"      eps={eps} → +{len(X_adv_n)} adversariaux (normaux, y=0)")
 
-    if include_normal:
-        mask_norm = (y_train == 0)
-        X_norm    = X_train[mask_norm].astype(np.float32)
-        y_norm    = y_train[mask_norm]
-        n_normal  = int(len(X_norm) * NORMAL_AUG_RATIO)
-        idx       = np.random.choice(len(X_norm), n_normal, replace=False)
-        X_n_sub   = X_norm[idx]
-        y_n_sub   = y_norm[idx]
+    # ── Adversariaux depuis les ATTAQUES (y=1) — OPTIONNEL ────
+    # FIX A : désactivé par défaut (adv_attack_ratio=0.0)
+    if adv_attack_ratio > 0:
+        mask_atk = (y_train == 1)
+        X_atk    = X_train[mask_atk].astype(np.float32)
+        y_atk    = y_train[mask_atk]
+        n_atk    = int(len(X_atk) * adv_attack_ratio)
+        idx_a    = np.random.choice(len(X_atk), n_atk, replace=False)
+        X_a_sub  = X_atk[idx_a]
+        y_a_sub  = y_atk[idx_a]
 
         for eps in eps_list:
-            X_adv_n = adv_fn(X_n_sub, y_n_sub, eps)
-            X_parts.append(X_adv_n)
-            y_parts.append(y_n_sub)
-            print(f"      eps={eps} → +{len(X_adv_n)} adversariaux (normaux)")
+            X_adv_a = adv_fn(X_a_sub, y_a_sub, eps)
+            X_parts.append(X_adv_a)
+            y_parts.append(y_a_sub)                       # label 1 conservé ✓
+            w_parts.append(np.full(len(X_adv_a), HARD_SAMPLE_WEIGHT))
+            print(f"      eps={eps} → +{len(X_adv_a)} adversariaux "
+                  f"(attaques, y=1, poids={HARD_SAMPLE_WEIGHT})")
 
     X_aug = np.concatenate(X_parts, axis=0)
     y_aug = np.concatenate(y_parts, axis=0)
-    print(f"      Dataset : {len(X_train)} → {len(X_aug)} exemples (+{len(X_aug)-len(X_train)})")
-    return X_aug, y_aug
+    w_aug = np.concatenate(w_parts, axis=0)
 
+    has_custom_weights = (w_aug != 1.0).any()
+    sw = w_aug if has_custom_weights else None
+
+    print(f"      Dataset : {len(X_train)} → {len(X_aug)} exemples "
+          f"(+{len(X_aug)-len(X_train)}) | "
+          f"poids custom : {'oui' if sw is not None else 'non'}")
+    return X_aug, y_aug, sw
+
+
+# ══════════════════════════════════════════════════════════════
+# DÉFENSE 3 — AUGMENTATION LogReg (FGSM + PGD)
+# ══════════════════════════════════════════════════════════════
 
 def augment_logreg(logreg_wrapper, X_train, y_train, X_test, y_test,
                    attack="fgsm", eps_list=None):
@@ -355,6 +440,7 @@ def augment_logreg(logreg_wrapper, X_train, y_train, X_test, y_test,
         return w
 
     print(f"    Génération X_adv LogReg ({attack}, eps={eps_list})...")
+    print(f"    [FIX A] Adversariaux depuis NORMAUX uniquement (adv_attack_ratio=0)")
 
     if attack == "fgsm":
         adv_fn = lambda X, y, eps: fgsm_logreg(logreg_wrapper, X, y, eps)
@@ -362,13 +448,20 @@ def augment_logreg(logreg_wrapper, X_train, y_train, X_test, y_test,
         adv_fn = lambda X, y, eps: pgd_logreg(logreg_wrapper, X, y, eps,
                                                iters=20, restarts=3)
 
-    X_aug, y_aug = _build_aug_dataset(X_train, y_train, adv_fn, eps_list)
+    # FIX A : _build_aug_dataset retourne maintenant (X, y, weights)
+    X_aug, y_aug, sample_weights = _build_aug_dataset(
+        X_train, y_train, adv_fn, eps_list
+    )
 
     new_lr = LogisticRegression(
         C=1.0, max_iter=2000, solver="saga",
         class_weight="balanced", random_state=42
     )
-    new_lr.fit(X_aug, y_aug)
+    # FIX A : passage des sample_weights si présents
+    fit_kwargs = {}
+    if sample_weights is not None:
+        fit_kwargs["sample_weight"] = sample_weights
+    new_lr.fit(X_aug, y_aug, **fit_kwargs)
 
     joblib.dump(new_lr, fpath)
     print(f"    Sauvegardé : {fpath}")
@@ -400,6 +493,7 @@ def augment_xgb_proxy(xgb_wrapper, mlp_proxy_wrapper,
         return w
 
     print(f"    Génération X_adv XGBoost via proxy MLP ({attack}, eps={eps_list})...")
+    print(f"    [FIX A] Adversariaux depuis NORMAUX uniquement")
 
     if attack == "fgsm":
         adv_fn = lambda X, y, eps: fgsm_mlp(mlp_proxy_wrapper, X, y, eps)
@@ -408,9 +502,12 @@ def augment_xgb_proxy(xgb_wrapper, mlp_proxy_wrapper,
                                             iters=20, restarts=3,
                                             alpha=PGD_AT_ALPHA(eps))
 
-    X_aug, y_aug = _build_aug_dataset(X_train, y_train, adv_fn, eps_list)
+    # FIX A : dépackage du triplet (X, y, weights)
+    X_aug, y_aug, sample_weights = _build_aug_dataset(
+        X_train, y_train, adv_fn, eps_list
+    )
 
-    w = _fit_xgb(X_aug, y_aug, fpath)
+    w = _fit_xgb(X_aug, y_aug, fpath, sample_weights=sample_weights)
     quick_eval(w, X_test, y_test, f"[clean] {fname}")
     return w
 
@@ -436,6 +533,7 @@ def augment_xgb_direct(xgb_wrapper, X_train, y_train, X_test, y_test,
         return w
 
     print(f"    Génération X_adv XGBoost DIRECTE ({attack}, eps={eps_list})...")
+    print(f"    [FIX A] Adversariaux depuis NORMAUX uniquement")
 
     if attack == "fgsm":
         adv_fn = lambda X, y, eps: fgsm_xgb(xgb_wrapper, X, y, eps)
@@ -443,14 +541,17 @@ def augment_xgb_direct(xgb_wrapper, X_train, y_train, X_test, y_test,
         adv_fn = lambda X, y, eps: pgd_xgb(xgb_wrapper, X, y, eps,
                                             iters=50, restarts=5)
 
-    X_aug, y_aug = _build_aug_dataset(X_train, y_train, adv_fn, eps_list)
+    # FIX A : dépackage du triplet (X, y, weights)
+    X_aug, y_aug, sample_weights = _build_aug_dataset(
+        X_train, y_train, adv_fn, eps_list
+    )
 
-    w = _fit_xgb(X_aug, y_aug, fpath)
+    w = _fit_xgb(X_aug, y_aug, fpath, sample_weights=sample_weights)
     quick_eval(w, X_test, y_test, f"[clean] {fname}")
     return w
 
 
-def _fit_xgb(X_aug, y_aug, fpath):
+def _fit_xgb(X_aug, y_aug, fpath, sample_weights=None):
     scale_pw = float((y_aug == 0).sum()) / float((y_aug == 1).sum())
     new_xgb  = XGBClassifier(
         n_estimators=500, max_depth=6, learning_rate=0.1,
@@ -462,12 +563,24 @@ def _fit_xgb(X_aug, y_aug, fpath):
     )
     idx = np.random.permutation(len(X_aug))
     X_aug, y_aug = X_aug[idx], y_aug[idx]
+    if sample_weights is not None:
+        sample_weights = sample_weights[idx]
+
     split = int(0.9 * len(X_aug))
+    sw_train = sample_weights[:split] if sample_weights is not None else None
+    sw_val   = sample_weights[split:] if sample_weights is not None else None
+
+    fit_kwargs = {}
+    if sw_train is not None:
+        fit_kwargs["sample_weight"] = sw_train
+    # Note : XGBoost n'accepte pas sample_weight dans eval_set,
+    # l'early stopping se fait sur la log-loss non pondérée (acceptable)
 
     new_xgb.fit(
         X_aug[:split], y_aug[:split],
         eval_set=[(X_aug[split:], y_aug[split:])],
-        verbose=False
+        verbose=False,
+        **fit_kwargs
     )
 
     new_xgb.save_model(str(fpath))
@@ -476,20 +589,14 @@ def _fit_xgb(X_aug, y_aug, fpath):
 
 
 # ══════════════════════════════════════════════════════════════
-# FIX 2 + FIX 3 — ÉVALUATION DÉFENSIVE AVEC C&W, LAMBDAS CORRIGÉES
+# ÉVALUATION DÉFENSIVE AVEC C&W, LAMBDAS CORRIGÉES
 # ══════════════════════════════════════════════════════════════
 
 def evaluate_defended_models(defended_models, X_test, y_test, eps=0.3):
     """
     Évalue chaque modèle défendu sous FGSM, PGD, C&W à eps=0.3.
 
-    FIX 2 : les lambdas capturent X_atk/y_atk via paramètres par
-    défaut (xatk=X_atk, yatk=y_atk) pour éviter la capture tardive.
-
-    FIX 3 : C&W est maintenant inclus dans l'évaluation.
-
     Colonnes : F1 clean | ASR FGSM | ASR PGD | ASR C&W
-    (toutes à eps=0.3, budget le plus sévère)
     """
     print(f"\n{'═'*72}")
     print(f"  ÉVALUATION DÉFENSIVE — eps={eps}")
@@ -502,10 +609,7 @@ def evaluate_defended_models(defended_models, X_test, y_test, eps=0.3):
         return hasattr(w, 'model') and hasattr(getattr(w, 'model', None), 'coef_')
 
     def _get_attack_fn(wrapper, attack_name, eps_val, X_atk, y_atk):
-        """
-        FIX 2 : X_atk et y_atk sont passés explicitement comme paramètres
-        par défaut pour forcer la capture par valeur dans la lambda.
-        """
+        """Capture par valeur via paramètres par défaut des lambdas."""
         is_mlp    = _is_mlp(wrapper)
         is_logreg = _is_logreg(wrapper)
 
@@ -529,7 +633,6 @@ def evaluate_defended_models(defended_models, X_test, y_test, eps=0.3):
                     wrapper, xatk, yatk, eps_val, iters=50, restarts=3)
 
         elif attack_name == "C&W":
-            # FIX 3 : C&W inclus pour les 3 types de modèles
             if is_mlp:
                 return lambda xatk=X_atk, yatk=y_atk: cw_mlp(
                     wrapper, xatk, yatk, eps_val)
@@ -581,40 +684,9 @@ def evaluate_defended_models(defended_models, X_test, y_test, eps=0.3):
     print(f"  {'─'*70}")
     return results
 
-def _convert_defense_results(flat_results: dict) -> dict:
-    """
-    Convertit la sortie plate de evaluate_defended_models()
-    vers la structure hiérarchique attendue par dashboard.py.
- 
-    flat_results : {label: {"f1_clean": float, "FGSM": float, "PGD": float, "C&W": float}}
-    retourne     : {model: {defense: {attack: {"evasion_rate": %, "f1": float, "recall": None}}}}
-    """
-    out = {}
-    for label, metrics in flat_results.items():
-        model, defense = LABEL_MAP.get(label, (None, None))
-        if model is None:
-            continue
- 
-        out.setdefault(model, {}).setdefault(defense, {})
-        f1_clean = metrics.get("f1_clean")
- 
-        for att in EVAL_ATTACKS:
-            asr = metrics.get(att)          # fraction [0,1]
-            if asr is None:
-                continue
-            out[model][defense][att] = {
-                "evasion_rate": round(asr * 100, 2),   # → % pour cohérence avec whitebox_results
-                "f1":           round(f1_clean, 4) if f1_clean is not None else None,
-                "recall":       round(1.0 - asr, 4),   # approximation : recall ≈ 1 - ASR
-                "delta_f1":     None,                   # non calculé ici, peut être enrichi
-            }
-    return out
- 
- 
-# ── Coller ce bloc à la place de l'ancien bloc de sauvegarde dans run() ────────
- 
+
 # ══════════════════════════════════════════════════════════════
-# SAUVEGARDE JSON 
+# SAUVEGARDE JSON
 # ══════════════════════════════════════════════════════════════
 
 LABEL_MAP = {
@@ -672,6 +744,8 @@ def _save_defense_results(flat_results: dict, results_dir):
     with open(flat_path, "w") as f:
         json.dump(flat_results, f, indent=2)
     print(f"  defense_whitebox_results.json sauvegardé → {flat_path}")
+
+
 # ══════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════
@@ -683,8 +757,15 @@ def run():
     X_train, y_train, X_test, y_test, mlp_w, logreg_w, xgb_w = load_artifacts()
     input_size = X_train.shape[1]
 
-    print(f"\n  eps entraînement : {EPS_AT_LIST}")
-    print(f"  PGD AT : iters={PGD_AT_ITERS}, restarts=1, alpha=eps/4")
+    print(f"\n  [FIX B] EPS curriculum : {EPS_AT_START} → {EPS_AT_END} "
+          f"(évaluation à 0.3, patience={AT_PATIENCE})")
+    print(f"  [FIX A] NORMAL_AUG_RATIO={NORMAL_AUG_RATIO}, "
+          f"ADV_ATTACK_RATIO={ADV_ATTACK_RATIO}")
+    print(f"\n  ⚠  Supprimer les .pt/.pkl/.json existants si les modèles")
+    print(f"     ont été entraînés avec l'ancienne version !")
+    print(f"     rm ~/swat/artifacts/mlp_at_*.pt")
+    print(f"     rm ~/swat/artifacts/logreg_aug_*.pkl")
+    print(f"     rm ~/swat/artifacts/xgb_aug_*.json")
 
     print("\n" + "═"*60)
     print("  ENTRAÎNEMENT DES MODÈLES DÉFENDUS")
@@ -700,12 +781,12 @@ def run():
         X_train, y_train, X_test, y_test, input_size, attack="pgd"
     )
 
-    print("\n[3/6] Augmentation FGSM — LogReg (double eps + normaux)")
+    print("\n[3/6] Augmentation FGSM — LogReg")
     logreg_aug_fgsm = augment_logreg(
         logreg_w, X_train, y_train, X_test, y_test, attack="fgsm"
     )
 
-    print("\n[4/6] Augmentation PGD — LogReg (double eps + normaux)")
+    print("\n[4/6] Augmentation PGD — LogReg")
     logreg_aug_pgd = augment_logreg(
         logreg_w, X_train, y_train, X_test, y_test, attack="pgd"
     )
@@ -720,7 +801,7 @@ def run():
         xgb_w, X_train, y_train, X_test, y_test, attack="fgsm"
     )
 
-    # ── Évaluation défensive (FGSM + PGD + C&W à eps=0.3) ───
+    # ── Évaluation défensive ─────────────────────────────────
     defended_models = {
         "MLP baseline":           mlp_w,
         "MLP AT-FGSM":            mlp_at_fgsm,
@@ -735,7 +816,6 @@ def run():
 
     results = evaluate_defended_models(defended_models, X_test, y_test, eps=0.3)
 
-    # ── Sauvegarde JSON des résultats défensifs ──────────────
     import json
     RESULTS_DIR = Path("~/swat/results").expanduser()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
