@@ -7,7 +7,7 @@
 #   ex: adv_fgsm_MLP_eps0.1.npy, adv_square_LogReg_eps0.3.npy
 #
 # Modèles défendus attendus dans artifacts/ :
-#   mlp_at_fgsm.pt, mlp_at_pgd.pt, logreg_aug_fgsm.pkl, xgb_aug_fgsm.json
+#   mlp_at_fgsm.pt, mlp_at_pgd.pt, logreg_aug_fgsm.pkl
 #
 # Sortie : ~/swat/results/defense_results.json
 #
@@ -21,17 +21,15 @@ import re
 import warnings
 from pathlib import Path
 from sklearn.metrics import f1_score, precision_score, recall_score
-from xgboost import XGBClassifier
 
 warnings.filterwarnings("ignore")
 
 import sys
-import importlib.util
 
 BASE = Path(__file__).parent
 sys.path.insert(0, str(BASE))
 
-from models import MLP, MLPWrapper, LogRegWrapper, XGBoostWrapper
+from models import MLP, MLPWrapper, LogRegWrapper
 
 # ══════════════════════════════════════════════════════════════
 # CONFIG
@@ -42,11 +40,8 @@ RESULTS_DIR = Path("~/swat/results").expanduser()
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 THRESHOLD   = 0.45
 
-# On garde epsilon 0.3 (pire cas).
-# Si 0.3 n'existe pas pour une attaque donnée, on prend 0.1.
 EPS_PRIORITY = ["0.3", "0.5", "0.1"]
 
-# Correspondance nom de fichier → nom lisible pour le JSON
 ATTACK_NAME_MAP = {
     "fgsm":         "FGSM",
     "pgd":          "PGD",
@@ -63,31 +58,31 @@ ATTACK_NAME_MAP = {
     "ensemble-vmi": "Ensemble-VMI",
 }
 
-# Correspondance nom de fichier modèle → clé JSON
 MODEL_NAME_MAP = {
-    "MLP":     "MLP",
-    "LogReg":  "LogReg",
-    "XGBoost": "XGBoost",
+    "MLP":    "MLP",
+    "LogReg": "LogReg",
 }
+
+# Attaques whitebox — filtrées pour XGBoost (non différentiable)
+WHITEBOX_ATTACKS = {"fgsm", "pgd", "cw"}
 
 print(f"Device : {DEVICE}")
 
 
 # ══════════════════════════════════════════════════════════════
-# CHARGEMENT DES MODÈLES DÉFENDUS
+# CHARGEMENT DES MODÈLES DÉFENDUS  (MLP + LogReg uniquement)
 # ══════════════════════════════════════════════════════════════
 
 def load_defended_models(input_size):
     """
-    Charge les 4 modèles défendus depuis artifacts/.
+    Charge les modèles défendus depuis artifacts/.
     Retourne un dict :
       {
-        "MLP":     {"AT-FGSM": wrapper, "AT-PGD": wrapper},
-        "LogReg":  {"Aug-FGSM": wrapper},
-        "XGBoost": {"Aug-FGSM": wrapper},
+        "MLP":    {"AT-FGSM": wrapper, "AT-PGD": wrapper},
+        "LogReg": {"Aug-FGSM": wrapper},
       }
     """
-    defended = {"MLP": {}, "LogReg": {}, "XGBoost": {}}
+    defended = {"MLP": {}, "LogReg": {}}
 
     # MLP AT-FGSM
     p = SAVE_DIR / "mlp_at_fgsm.pt"
@@ -119,22 +114,7 @@ def load_defended_models(input_size):
     else:
         print(f"  ✗ logreg_aug_fgsm.pkl introuvable — lance defenses.py d'abord")
 
-    # XGBoost Aug-FGSM
-    p = SAVE_DIR / "xgb_aug_fgsm.json"
-    if p.exists():
-        xgb = XGBClassifier()
-        xgb.load_model(str(p))
-        defended["XGBoost"]["Aug-FGSM"] = XGBoostWrapper(xgb)
-        print(f"  ✓ XGBoost Aug-FGSM chargé")
-    else:
-        print(f"  ✗ xgb_aug_fgsm.json introuvable — lance defenses.py d'abord")
-
     return defended
-
-
-# Attaques whitebox — n'existent pas pour XGBoost (non différentiable)
-# On les ignore pour ne pas afficher de résultats trompeurs
-WHITEBOX_ATTACKS = {"fgsm", "pgd", "cw"}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -144,22 +124,12 @@ WHITEBOX_ATTACKS = {"fgsm", "pgd", "cw"}
 def scan_adv_files():
     """
     Parcourt artifacts/ et groupe les fichiers adv_*.npy par (attaque, modèle).
-    Nouveau format : adv_{attaque}_{modèle}_sub_{substitut}_eps{eps}.npy
-    Ancien format (whitebox/blackbox) : adv_{attaque}_{modèle}_eps{eps}.npy
-
-    Retourne un dict :
-      {
-        ("FGSM",    "MLP"):    [{"path": Path, "eps": "0.1", "sub": None}, ...],
-        ("MI-FGSM", "MLP"):    [{"path": Path, "eps": "0.1", "sub": "Sub1-MLP"}, ...],
-        ...
-      }
+    Ignore tous les fichiers XGBoost.
     """
-    # Nouveau format (avec substitut)
     pat_sub = re.compile(
         r"adv_(.+?)_(MLP|LogReg|XGBoost)_sub_(.+?)_eps([\d.]+)\.npy",
         re.IGNORECASE
     )
-    # Ancien format (sans substitut — whitebox, blackbox)
     pat_old = re.compile(
         r"adv_(.+?)_(MLP|LogReg|XGBoost)_eps([\d.]+)\.npy",
         re.IGNORECASE
@@ -184,11 +154,12 @@ def scan_adv_files():
         else:
             continue
 
-        attack_clean = ATTACK_NAME_MAP.get(raw_attack, raw_attack.upper())
-        model_clean  = MODEL_NAME_MAP.get(raw_model, raw_model)
-
-        if model_clean == "XGBoost" and raw_attack in WHITEBOX_ATTACKS:
+        # Ignorer XGBoost complètement
+        if raw_model.lower() == "xgboost":
             continue
+
+        model_clean  = MODEL_NAME_MAP.get(raw_model, raw_model)
+        attack_clean = ATTACK_NAME_MAP.get(raw_attack, raw_attack.upper())
 
         key = (attack_clean, model_clean)
         grouped.setdefault(key, []).append({
@@ -204,14 +175,9 @@ def scan_adv_files():
 
 
 def pick_best_eps(eps_dict):
-    """
-    Parmi les epsilon disponibles, retourne le path du pire cas.
-    Priorité : 0.3 > 0.5 > 0.1 > premier disponible.
-    """
     for eps in EPS_PRIORITY:
         if eps in eps_dict:
             return eps_dict[eps], eps
-    # fallback : prend le plus grand epsilon disponible
     best_eps = max(eps_dict.keys(), key=float)
     return eps_dict[best_eps], best_eps
 
@@ -221,23 +187,11 @@ def pick_best_eps(eps_dict):
 # ══════════════════════════════════════════════════════════════
 
 def compute_metrics(wrapper, X_test, y_test, X_adv, y_adv):
-    """
-    Calcule ASR, recall, precision, F1 sur les exemples adversariaux.
-    X_adv : exemples perturbés (uniquement les exemples attack)
-    y_adv : labels correspondants (tous == 1)
-
-    Retourne un dict avec evasion_rate, recall, precision, f1.
-    """
     y_pred_adv = wrapper.predict(X_adv)
-
-    # ASR = fraction d'exemples attack classés comme normal (0)
-    asr = float((y_pred_adv == 0).sum()) / len(y_pred_adv)
-
-    # Métriques sur les adversariaux
+    asr       = float((y_pred_adv == 0).sum()) / len(y_pred_adv)
     recall    = recall_score(y_adv, y_pred_adv, zero_division=0)
     precision = precision_score(y_adv, y_pred_adv, zero_division=0)
     f1        = f1_score(y_adv, y_pred_adv, zero_division=0)
-
     return {
         "evasion_rate": round(asr * 100, 2),
         "recall":       round(recall, 4),
@@ -247,14 +201,10 @@ def compute_metrics(wrapper, X_test, y_test, X_adv, y_adv):
 
 
 # ══════════════════════════════════════════════════════════════
-# CHARGEMENT DES RÉSULTATS BASELINE (pour delta_f1)
+# CHARGEMENT DES RÉSULTATS BASELINE
 # ══════════════════════════════════════════════════════════════
 
 def load_baseline_results():
-    """
-    Charge les JSON baseline existants pour calculer le delta_f1.
-    Retourne un dict plat : {("FGSM", "MLP"): {"evasion_rate": ..., "f1": ...}}
-    """
     baseline = {}
     for fname in ["whitebox_results.json", "blackbox_results.json",
                   "transfer_results.json"]:
@@ -263,11 +213,9 @@ def load_baseline_results():
             continue
         with open(p) as f:
             data = json.load(f)
-        # Structure attendue : {model: {attack: {evasion_rate, f1, ...}}}
         for model, attacks in data.items():
             for attack, metrics in attacks.items():
                 baseline[(attack, model)] = metrics
-
     print(f"  {len(baseline)} entrées baseline chargées depuis results/")
     return baseline
 
@@ -279,7 +227,6 @@ def load_baseline_results():
 def run():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Chargement données ───────────────────────────────────
     print("\n" + "═"*60)
     print("  CHARGEMENT")
     print("═"*60)
@@ -293,13 +240,10 @@ def run():
     adv_files = scan_adv_files()
     baseline  = load_baseline_results()
 
-    # ── Boucle d'évaluation ──────────────────────────────────
     print("\n" + "═"*60)
     print("  ÉVALUATION")
     print("═"*60)
 
-    # Structure de sortie :
-    # { "MLP": { "AT-FGSM": { "FGSM": {metrics}, "Square": {metrics}, ... } } }
     out = {}
 
     for (attack_name, model_name), entries in sorted(adv_files.items()):
@@ -308,14 +252,9 @@ def run():
         if not defenses:
             continue
 
-        # Pour les attaques avec plusieurs substituts, on choisit le pire cas
-        # (max ASR) par défense. Pour whitebox/blackbox (1 seul fichier),
-        # c'est équivalent à l'ancien comportement.
-
-        # Trie les fichiers : priorité epsilon 0.3 > 0.5 > 0.1
         def eps_rank(e):
             try:
-                return -float(e["eps"])   # plus grand epsilon en premier
+                return -float(e["eps"])
             except ValueError:
                 return 0
 
@@ -339,7 +278,6 @@ def run():
                     best_metrics = metrics
                     best_sub     = entry["sub"] or "—"
 
-            # Delta F1 vs baseline
             base    = baseline.get((attack_name, model_name), {})
             base_f1 = base.get("f1", None)
             best_metrics["delta_f1"] = (
@@ -355,13 +293,11 @@ def run():
             out.setdefault(model_name, {}) \
                .setdefault(defense_name, {})[attack_name] = best_metrics
 
-    # ── Sauvegarde JSON ──────────────────────────────────────
     json_path = RESULTS_DIR / "defense_results.json"
     with open(json_path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\n✓ defense_results.json sauvegardé → {json_path}")
 
-    # ── Résumé terminal ──────────────────────────────────────
     print("\n" + "═"*60)
     print("  RÉSUMÉ — ASR par défense")
     print("═"*60)
