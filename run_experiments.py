@@ -27,7 +27,7 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 DEVICE  = "cuda" if torch.cuda.is_available() else "cpu"
 EPS     = 0.1
-N_RUNS  = 5
+N_RUNS  = 10
 SEEDS   = list(range(N_RUNS))
 
 print(f"Device : {DEVICE} | N_RUNS : {N_RUNS}")
