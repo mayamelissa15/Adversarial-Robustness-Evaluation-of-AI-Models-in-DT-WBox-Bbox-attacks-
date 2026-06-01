@@ -57,7 +57,7 @@ RESULTS_DIR = Path("~/swat/results").expanduser()
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 DEVICE  = "cuda" if torch.cuda.is_available() else "cpu"
-EPS     = 0.1          # epsilon unique pour le multi-run (cohérent avec blackbox)
+EPS     = 0.3       # epsilon unique pour le multi-run (cohérent avec blackbox)
 N_RUNS  = 10
 SEEDS   = list(range(N_RUNS))
 
