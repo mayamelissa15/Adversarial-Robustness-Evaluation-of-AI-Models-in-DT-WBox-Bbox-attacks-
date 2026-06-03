@@ -154,7 +154,7 @@ def nes_attack(wrapper, X_np, y_np, eps,
 #       vérification que le résultat de binary_search est bien adverse
 # ─────────────────────────────────────────────
 
-def hsja(wrapper, X_np, y_np, eps, iters=40, n_est=100, stepsize_init=0.1):
+def hsja(wrapper, X_np, y_np, eps, iters=20, n_est=30, stepsize_init=0.1):
     N, D   = X_np.shape
     X_orig = X_np.copy()
     y_flat = y_np.flatten().astype(int)
@@ -236,7 +236,7 @@ def hsja(wrapper, X_np, y_np, eps, iters=40, n_est=100, stepsize_init=0.1):
 #       au lieu de retirer une direction aléatoire à chaque itération
 # ─────────────────────────────────────────────
 
-def rays(wrapper, X_np, y_np, eps, iters=60, search_steps=15):
+def rays(wrapper, X_np, y_np, eps, iters=30, search_steps=10):
     N, D   = X_np.shape
     X_orig = X_np.copy()
     y_flat = y_np.flatten().astype(int)

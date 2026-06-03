@@ -34,8 +34,8 @@ EPS = 0.1
 N_RUNS = 10
 SEEDS = list(range(N_RUNS))
 
-# Mets None pour lancer HSJA/RayS sur tous les exemples d'attaque.
-MAX_DECISION_BOUNDARY = None
+# Mets None pour lancer HSJA/RayS sur tous les exemples d'attaque => impossiblke ca va prendre 135h 
+MAX_DECISION_BOUNDARY = 100
 
 OUT_CSV = RESULTS_DIR / "hsja_rays_10seeds.csv"
 TMP_CSV = RESULTS_DIR / "hsja_rays_10seeds_tmp.csv"

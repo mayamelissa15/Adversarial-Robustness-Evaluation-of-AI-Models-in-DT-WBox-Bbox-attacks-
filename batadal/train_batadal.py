@@ -1,38 +1,45 @@
-# ~/swat/batadal/train_batadal.py
 """
-Entraînement MLP / LogReg / XGBoost sur BATADAL.
+train_batadal.py  —  version corrigée v2
+══════════════════════════════════════════════════════════════
 
-Structure BATADAL :
-  dataset03 : 8761 exemples normaux uniquement (ATT_FLAG = 0)
-  dataset04 : 3958 normaux (ATT_FLAG = -999) + 219 attaques (ATT_FLAG = 1)
+STRATÉGIE :
+  - Test  = dataset04 entier  → 219 attaques (résolution 0.46%)
+  - Train = dataset03 (normaux) + 80% de dataset04 (normaux + attaques)
+    → le modèle voit des attaques pendant l'entraînement
+    → les 20% restants de d04 restent dans le test uniquement
 
-Stratégie :
-  - Train : dataset03 (normal) + exemples normaux de dataset04
-  - Test  : dataset04 complet  (-999 → 0, 1 → 1)
-  
-  On garde dataset04 entier en test pour avoir les attaques,
-  et on enrichit le training avec ses normaux pour équilibrer.
+  En pratique : on split d04 en 80/20 stratifié,
+  la partie 80% va en train, la partie 100% reste en test.
+  Comme d04 a 219 attaques → ~175 en train, ~44 en test
+  + tous les normaux de d03 et d04 en train.
+
+  Test final = d04 entier (3958 normaux + 219 attaques = 4177)
 """
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import joblib
 import warnings
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, classification_report
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split  # ← ajouter ça
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
 
 import sys
-sys.path.append(str(Path(__file__).parent.parent))  # accès à models.py dans ~/swat/
+sys.path.append(str(Path(__file__).parent.parent))
 from models import MLP
+
+try:
+    from xgboost import XGBClassifier
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+    print("⚠  XGBoost non disponible, skipped.")
 
 # ══════════════════════════════════════════════════════════════
 # CONFIG
@@ -51,7 +58,7 @@ LR        = 1e-3
 # ══════════════════════════════════════════════════════════════
 # CHARGEMENT & PRÉPARATION
 # ══════════════════════════════════════════════════════════════
-# ici on a merge comme dans swat 
+
 def load_batadal():
     d03 = pd.read_csv(DATA_DIR / "BATADAL_dataset03.csv", skipinitialspace=True)
     d04 = pd.read_csv(DATA_DIR / "BATADAL_dataset04.csv", skipinitialspace=True)
@@ -62,49 +69,71 @@ def load_batadal():
     d03["label"] = 0
     d04["label"] = (d04["ATT_FLAG"] == 1).astype(int)
 
-    # Jumeler les deux datasets comme SWaT
-    full = pd.concat([d03, d04], ignore_index=True)
-    X    = full[feature_cols].values.astype(np.float32)
-    y    = full["label"].values.astype(int)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
+    # ── Split d04 en 80/20 stratifié ─────────────────────────
+    # 80% → enrichit le train  |  test = d04 entier (les deux parties)
+    d04_train, _ = train_test_split(
+        d04, test_size=0.2, stratify=d04["label"], random_state=42
     )
 
+    # Train = d03 complet + 80% de d04
+    train_df = pd.concat([d03, d04_train], ignore_index=True)
+    # Test  = d04 complet (les 219 attaques sont toutes là)
+    test_df  = d04.copy()
+
+    X_train = train_df[feature_cols].values.astype(np.float32)
+    y_train = train_df["label"].values.astype(int)
+    X_test  = test_df[feature_cols].values.astype(np.float32)
+    y_test  = test_df["label"].values.astype(int)
+
+    # Normalisation
     scaler  = StandardScaler()
     X_train = scaler.fit_transform(X_train).astype(np.float32)
     X_test  = scaler.transform(X_test).astype(np.float32)
-
     joblib.dump(scaler, SAVE_DIR / "scaler.pkl")
 
-    print(f"Train : {X_train.shape} — attaques : {y_train.sum()} / {len(y_train)}")
-    print(f"Test  : {X_test.shape}  — attaques : {y_test.sum()} / {len(y_test)}")
-    print(f"Features : {len(feature_cols)} → {feature_cols}")
+    # ── Vérification ─────────────────────────────────────────
+    n_att_train = int(y_train.sum())
+    n_att_test  = int(y_test.sum())
+    print(f"\n{'─'*55}")
+    print(f"  Split summary")
+    print(f"{'─'*55}")
+    print(f"  Train : {X_train.shape}  — normaux : {(y_train==0).sum():>5}  attaques : {n_att_train:>4}")
+    print(f"  Test  : {X_test.shape}   — normaux : {(y_test==0).sum():>5}  attaques : {n_att_test:>4}")
+    print(f"  Résolution ASR : 1/{n_att_test} ≈ {100/n_att_test:.2f}% par sample  ✅")
+    print(f"  Features : {len(feature_cols)} → {feature_cols[:4]} ...")
 
-    return X_train, y_train, X_test, y_test
+    assert n_att_train > 0, "❌ Aucune attaque en train — les modèles ne peuvent rien apprendre !"
+    assert n_att_test  >= 100, f"❌ Seulement {n_att_test} attaques en test — split incorrect !"
+
+    return X_train, y_train, X_test, y_test, len(feature_cols)
+
 
 # ══════════════════════════════════════════════════════════════
-# ENTRAÎNEMENT MLP
+# MLP
 # ══════════════════════════════════════════════════════════════
 
 def train_mlp(X_train, y_train, X_test, y_test, input_size):
-    print(f"\n{'─'*50}")
+    print(f"\n{'─'*55}")
     print("  MLP")
-    print(f"{'─'*50}")
+    print(f"{'─'*55}")
 
-    model = MLP(input_size=input_size).to(DEVICE)
+    model     = MLP(input_size=input_size).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-    # Poids pour déséquilibre (219 attaques vs ~12k normaux)
-    n_pos = y_train.sum()
+    n_pos = int(y_train.sum())
     n_neg = len(y_train) - n_pos
-    pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32).to(DEVICE)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    raw_pw = n_neg / n_pos
+    capped_pw = min(raw_pw, 15.0)
+    print(f"  pos_weight = {n_neg}/{n_pos} = {raw_pw:.1f}  → cappé à {capped_pw:.1f}")
+
+    pos_weight = torch.tensor([capped_pw], dtype=torch.float32).to(DEVICE)
+    criterion  = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     X_tr = torch.tensor(X_train, dtype=torch.float32)
     y_tr = torch.tensor(y_train, dtype=torch.float32)
+    X_te = torch.tensor(X_test,  dtype=torch.float32)
 
-    best_f1   = 0.0
+    best_f1    = 0.0
     best_state = None
 
     for epoch in range(EPOCHS):
@@ -119,11 +148,9 @@ def train_mlp(X_train, y_train, X_test, y_test, input_size):
             criterion(model(xb), yb).backward()
             optimizer.step()
 
-        # Eval
         model.eval()
         with torch.no_grad():
-            logits = model(torch.tensor(X_test, dtype=torch.float32).to(DEVICE))
-            proba  = torch.sigmoid(logits).squeeze(-1).cpu().numpy()
+            proba = torch.sigmoid(model(X_te.to(DEVICE))).squeeze(-1).cpu().numpy()
         preds = (proba >= THRESHOLD).astype(int)
         f1    = f1_score(y_test, preds, zero_division=0)
 
@@ -132,35 +159,38 @@ def train_mlp(X_train, y_train, X_test, y_test, input_size):
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
         if (epoch + 1) % 10 == 0:
-            print(f"  Epoch {epoch+1:3d}/{EPOCHS} — F1 test : {f1:.4f}  (best: {best_f1:.4f})")
+            print(f"  Epoch {epoch+1:3d}/{EPOCHS} — F1 : {f1:.4f}  (best : {best_f1:.4f})")
 
     model.load_state_dict(best_state)
     torch.save(best_state, SAVE_DIR / "best_mlp.pt")
-    print(f"  ✓ MLP sauvegardé — best F1 = {best_f1:.4f}")
 
-    # Rapport final
     model.eval()
     with torch.no_grad():
-        logits = model(torch.tensor(X_test, dtype=torch.float32).to(DEVICE))
-        proba  = torch.sigmoid(logits).squeeze(-1).cpu().numpy()
+        proba = torch.sigmoid(model(X_te.to(DEVICE))).squeeze(-1).cpu().numpy()
     preds = (proba >= THRESHOLD).astype(int)
-    print(classification_report(y_test, preds, zero_division=0))
 
+    print(f"\n  ✅ MLP sauvegardé — best F1 = {best_f1:.4f}")
+    print(classification_report(y_test, preds, zero_division=0))
     return model
 
 
 # ══════════════════════════════════════════════════════════════
-# ENTRAÎNEMENT LOGISTIC REGRESSION
+# LOGISTIC REGRESSION
 # ══════════════════════════════════════════════════════════════
 
 def train_logreg(X_train, y_train, X_test, y_test):
-    print(f"\n{'─'*50}")
+    print(f"\n{'─'*55}")
     print("  Logistic Regression")
-    print(f"{'─'*50}")
+    print(f"{'─'*55}")
+
+    n_pos = int(y_train.sum())
+    n_neg = len(y_train) - n_pos
+    capped = min(n_neg / n_pos, 15.0)
+    print(f"  class_weight attaque cappé à {capped:.1f}")
 
     model = LogisticRegression(
         max_iter=1000,
-        class_weight="balanced",   # compense le déséquilibre
+        class_weight={0: 1.0, 1: capped},
         C=1.0,
         solver="lbfgs"
     )
@@ -171,24 +201,27 @@ def train_logreg(X_train, y_train, X_test, y_test):
     f1    = f1_score(y_test, preds, zero_division=0)
 
     joblib.dump(model, SAVE_DIR / "logreg.pkl")
-    print(f"  ✓ LogReg sauvegardé — F1 = {f1:.4f}")
+    print(f"  ✅ LogReg sauvegardé — F1 = {f1:.4f}")
     print(classification_report(y_test, preds, zero_division=0))
-
     return model
 
 
 # ══════════════════════════════════════════════════════════════
-# ENTRAÎNEMENT XGBOOST
+# XGBOOST
 # ══════════════════════════════════════════════════════════════
 
 def train_xgboost(X_train, y_train, X_test, y_test):
-    print(f"\n{'─'*50}")
-    print("  XGBoost")
-    print(f"{'─'*50}")
+    if not HAS_XGB:
+        return None
 
-    n_pos = y_train.sum()
+    print(f"\n{'─'*55}")
+    print("  XGBoost")
+    print(f"{'─'*55}")
+
+    n_pos = int(y_train.sum())
     n_neg = len(y_train) - n_pos
-    scale = n_neg / n_pos   # compense le déséquilibre
+    scale = min(n_neg / n_pos, 15.0)
+    print(f"  scale_pos_weight cappé à {scale:.1f}")
 
     model = XGBClassifier(
         n_estimators=300,
@@ -208,9 +241,8 @@ def train_xgboost(X_train, y_train, X_test, y_test):
     f1    = f1_score(y_test, preds, zero_division=0)
 
     model.save_model(str(SAVE_DIR / "xgb.json"))
-    print(f"  ✓ XGBoost sauvegardé — F1 = {f1:.4f}")
+    print(f"  ✅ XGBoost sauvegardé — F1 = {f1:.4f}")
     print(classification_report(y_test, preds, zero_division=0))
-
     return model
 
 
@@ -219,27 +251,24 @@ def train_xgboost(X_train, y_train, X_test, y_test):
 # ══════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{'═'*50}")
-    print(f"  BATADAL — Entraînement")
+    print(f"\n{'═'*55}")
+    print(f"  BATADAL — Entraînement v2 (split corrigé)")
     print(f"  Device : {DEVICE}")
-    print(f"{'═'*50}")
+    print(f"{'═'*55}")
 
-    X_train, y_train, X_test, y_test = load_batadal()
+    X_train, y_train, X_test, y_test, input_size = load_batadal()
 
-    # Sauvegarde X_test / y_test pour whitebox/blackbox
     np.save(SAVE_DIR / "X_test.npy", X_test)
     np.save(SAVE_DIR / "y_test.npy", y_test)
-    print(f"\n✓ X_test.npy / y_test.npy sauvegardés → {SAVE_DIR}")
-
-    input_size = X_train.shape[1]  # 43 features BATADAL
+    print(f"\n  ✅ X_test / y_test sauvegardés → {SAVE_DIR}")
 
     train_mlp(X_train, y_train, X_test, y_test, input_size)
     train_logreg(X_train, y_train, X_test, y_test)
     train_xgboost(X_train, y_train, X_test, y_test)
 
-    print(f"\n{'═'*50}")
-    print(f"  ✓ Tous les artifacts dans {SAVE_DIR}")
-    print(f"{'═'*50}")
+    print(f"\n{'═'*55}")
+    print(f"  ✅ Tous les artifacts → {SAVE_DIR}")
+    print(f"{'═'*55}")
 
 
 if __name__ == "__main__":
