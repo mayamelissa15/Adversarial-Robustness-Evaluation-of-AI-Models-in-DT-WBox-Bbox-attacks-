@@ -241,7 +241,172 @@ def load_baseline_results():
     print(f"  {len(baseline)} entrées baseline chargées depuis results/")
     return baseline
 
+#ici on va plot un peu 
+# ══════════════════════════════════════════════════════════════
+# GRAPHES ASR AVANT / APRÈS PAR TYPE D'ATTAQUE
+# ══════════════════════════════════════════════════════════════
 
+def plot_asr_before_after(out, baseline, results_dir):
+    """
+    Génère deux figures séparées :
+      - asr_whitebox.png  : FGSM, PGD, CW
+      - asr_blackbox.png  : Square, NES, HSJA, RayS, MI-FGSM, VMI-FGSM, Ensemble-MI
+    Chaque barre groupe : baseline vs chaque défense disponible.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+
+    WHITEBOX_ATTACKS = {"FGSM", "PGD", "CW"}
+    BLACKBOX_ATTACKS = {"Square", "NES", "HSJA", "RayS",
+                        "MI-FGSM", "VMI-FGSM", "Ensemble-MI"}
+
+    # Couleurs par défense
+    DEFENSE_COLORS = {
+        "baseline":       "#555555",
+        "AT-FGSM":        "#E07B54",
+        "AT-PGD":         "#5B8DB8",
+        "Aug-FGSM":       "#6ABD8A",
+        "Aug-FGSM-Iter":  "#A97DC9",
+    }
+
+    def build_data(attack_set):
+        """
+        Retourne :
+          attacks   : liste ordonnée des noms d'attaques présentes
+          model_data : dict { model_name : { defense_name : [asr, ...] } }
+        """
+        # Collecte toutes les attaques présentes dans out ET dans baseline
+        attacks_present = set()
+        for model_name, defenses in out.items():
+            for defense_name, atk_dict in defenses.items():
+                for atk in atk_dict:
+                    if atk in attack_set:
+                        attacks_present.add(atk)
+        for (atk, mdl) in baseline:
+            if atk in attack_set:
+                attacks_present.add(atk)
+
+        attacks = sorted(attacks_present)
+        if not attacks:
+            return None, None
+
+        model_data = {}
+        for model_name in ["MLP", "LogReg", "XGBoost"]:
+            # baseline
+            base_asrs = []
+            for atk in attacks:
+                b = baseline.get((atk, model_name), {})
+                base_asrs.append(b.get("evasion_rate", float("nan")))
+
+            defended_asrs = {}
+            for defense_name, atk_dict in out.get(model_name, {}).items():
+                d_asrs = []
+                for atk in attacks:
+                    m = atk_dict.get(atk, {})
+                    d_asrs.append(m.get("evasion_rate", float("nan")))
+                defended_asrs[defense_name] = d_asrs
+
+            if any(not np.isnan(v) for v in base_asrs) or defended_asrs:
+                model_data[model_name] = {"baseline": base_asrs, **defended_asrs}
+
+        return attacks, model_data
+
+    def draw_figure(attacks, model_data, title, out_path):
+        if not model_data:
+            print(f"  Aucune donnée pour {title}, graphe ignoré")
+            return
+
+        models = list(model_data.keys())
+        n_models   = len(models)
+        n_attacks  = len(attacks)
+
+        # Nombre de barres par groupe d'attaque
+        all_defenses = ["baseline"] + sorted(
+            {d for m in model_data.values() for d in m if d != "baseline"}
+        )
+        n_bars = len(all_defenses)
+
+        fig, axes = plt.subplots(
+            1, n_models,
+            figsize=(max(6, n_attacks * n_bars * 0.55 * n_models / n_models + 2),
+                     5),
+            sharey=True
+        )
+        if n_models == 1:
+            axes = [axes]
+
+        fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
+
+        bar_w  = 0.8 / n_bars
+        x      = np.arange(n_attacks)
+
+        for ax, model_name in zip(axes, models):
+            d = model_data[model_name]
+            for i, def_name in enumerate(all_defenses):
+                if def_name not in d:
+                    continue
+                vals   = d[def_name]
+                color  = DEFENSE_COLORS.get(def_name, "#999999")
+                offset = (i - n_bars / 2 + 0.5) * bar_w
+                bars   = ax.bar(
+                    x + offset, vals, width=bar_w * 0.9,
+                    color=color, alpha=0.85, label=def_name,
+                    zorder=3
+                )
+                # Valeurs au-dessus des barres
+                for bar, v in zip(bars, vals):
+                    if not np.isnan(v):
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            bar.get_height() + 0.8,
+                            f"{v:.0f}",
+                            ha="center", va="bottom",
+                            fontsize=7, color="#333333"
+                        )
+
+            ax.set_title(model_name, fontsize=11, pad=8)
+            ax.set_xticks(x)
+            ax.set_xticklabels(attacks, rotation=30, ha="right", fontsize=9)
+            ax.set_ylabel("ASR (%)" if ax == axes[0] else "")
+            ax.set_ylim(0, 105)
+            ax.yaxis.grid(True, linestyle="--", alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+
+        # Légende commune
+        patches = [
+            mpatches.Patch(color=DEFENSE_COLORS.get(d, "#999999"), label=d)
+            for d in all_defenses
+            if any(d in model_data[m] for m in models)
+        ]
+        fig.legend(
+            handles=patches,
+            loc="lower center",
+            ncol=len(patches),
+            frameon=False,
+            fontsize=9,
+            bbox_to_anchor=(0.5, -0.08)
+        )
+
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  ✓ {out_path.name} sauvegardé")
+
+    # ── Whitebox ─────────────────────────────────────────────
+    attacks_wb, data_wb = build_data(WHITEBOX_ATTACKS)
+    draw_figure(attacks_wb, data_wb,
+                "ASR avant / après défense — Attaques White-Box",
+                results_dir / "asr_whitebox.png")
+
+    # ── Blackbox ─────────────────────────────────────────────
+    attacks_bb, data_bb = build_data(BLACKBOX_ATTACKS)
+    draw_figure(attacks_bb, data_bb,
+                "ASR avant / après défense — Attaques Black-Box",
+                results_dir / "asr_blackbox.png")
 # ══════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════
@@ -329,7 +494,12 @@ def run():
             avg  = sum(asrs) / len(asrs) if asrs else 0
             bar  = "█" * int(avg / 5) + "░" * (20 - int(avg / 5))
             print(f"  {model_name}/{defense_name:<15} {bar}  {avg:5.1f}% (moy)")
+    print("\n" + "═"*60)
+    print("  GÉNÉRATION DES GRAPHES")
+    print("═"*60)
+    plot_asr_before_after(out, baseline, RESULTS_DIR)
 
+    return out
     return out
 
 
