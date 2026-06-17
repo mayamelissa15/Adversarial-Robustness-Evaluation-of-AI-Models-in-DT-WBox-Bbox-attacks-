@@ -1,6 +1,3 @@
-# ~/swat/run_experiments_fast.py
-# Version rapide : skip HSJA/RayS, 5 seeds, substituts légers
-
 import numpy as np
 import torch
 import joblib
