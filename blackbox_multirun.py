@@ -260,7 +260,7 @@ def subsample_bb(X_atk, y_atk, seed):
     return X_atk[idx], y_atk[idx]
 
 
-def build_bb_eval(X_ev, y_ev, X_atk_bb, X_adv_bb):
+def build_bb_eval(X_ev, y_ev, X_atk_bb):
     """
     Reconstruit un eval set limité aux exemples bb + normaux.
     Évite la dilution de l'ASR.
@@ -272,9 +272,8 @@ def build_bb_eval(X_ev, y_ev, X_atk_bb, X_adv_bb):
     X_ev_bb  = np.concatenate([X_normal, X_atk_bb], axis=0)
     y_ev_bb  = np.concatenate([y_normal,
                                 np.ones(len(X_atk_bb), dtype=y_ev.dtype)], axis=0)
-    X_adv_ev = np.concatenate([X_normal, X_adv_bb], axis=0)
 
-    return X_ev_bb, y_ev_bb, X_adv_ev
+    return X_ev_bb, y_ev_bb
 
 
 def already_done(existing_df, seed, attack, model):
@@ -486,13 +485,11 @@ def run():
 
                     X_adv_bb = atk_fn(vic_w, X_atk_bb, y_atk_bb, EPS, **atk_kw)
 
-                    X_ev_bb, y_ev_bb, X_adv_ev = build_bb_eval(
-                        X_ev=X_eval, y_ev=y_eval,
-                        X_atk_bb=X_atk_bb, X_adv_bb=X_adv_bb)
+                    X_ev_bb, y_ev_bb = build_bb_eval(
+                         X_ev=X_eval, y_ev=y_eval, X_atk_bb=X_atk_bb)
 
-                    r = eval_attack(vic_w, X_ev_bb, y_ev_bb, X_adv_ev,
-                                    atk_name, vic_name, threshold=0.45)
-                    # ✅ FIX : suppression de "n_attacked" redondant
+                    r = eval_attack(vic_w, X_ev_bb, y_ev_bb, X_adv_bb,atk_name, vic_name, threshold=0.45)
+                    
                     r.update({"seed": seed, "family": "Decision-based",
                                "eps": EPS, "dataset": DATASET,
                                "n_atk": len(X_atk_bb)})
