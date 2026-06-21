@@ -320,3 +320,64 @@ def eval_attack(wrapper, X_full, y_full, X_adv, attack_name, model_name,
         "margin_drop_mean":  float(np.mean(clean_margin - adv_margin)),
         "n_tp": n_tp,
     }
+
+
+# ══════════════════════════════════════════════════════════════
+# VERSION PAR-ÉCHANTILLON (pour analyse temporelle)
+# ══════════════════════════════════════════════════════════════
+# détaillé (timestamp + succès individuel + marge + L∞) en plus du
+# résumé agrégé déjà produit par eval_attack.
+
+def eval_attack_persample(wrapper, X_full, y_full, X_adv, attack_name, model_name,
+                           timestamps_full, threshold=0.45, max_samples=50, seed=0):
+    """
+    Retourne une liste de dicts (un par échantillon attaqué, sous-échantillonnée
+    à `max_samples`), avec : timestamp, succès individuel, marge logit, L∞.
+
+    timestamps_full DOIT être aligné position par position avec X_full/y_full
+    (même longueur, même ordre — typiquement timestamps_test[idx_ev]).
+    """
+    y_pred_clean = wrapper.predict(X_full, threshold=threshold)
+    tp_mask      = (y_full == 1) & (y_pred_clean == 1)
+    n_tp         = int(tp_mask.sum())
+
+    if n_tp == 0:
+        return []
+
+    if len(X_adv) != n_tp:
+        raise ValueError(
+            f"X_adv contient {len(X_adv)} samples, mais le nombre de TP clean "
+            f"dans X_full est {n_tp}."
+        )
+
+    X_eval     = X_full.copy()
+    X_eval[tp_mask] = X_adv
+    y_pred_adv = wrapper.predict(X_eval, threshold=threshold)
+
+    success_per_sample = (y_pred_adv[tp_mask] == 0)  # True = attaque réussie
+
+    threshold_logit       = float(np.log(threshold / (1.0 - threshold)))
+    adv_margin_per_sample = wrapper.logits_np(X_adv) - threshold_logit
+
+    diff            = np.abs(X_adv - X_full[tp_mask])
+    linf_per_sample = np.max(diff, axis=1)
+
+    timestamps_tp = np.asarray(timestamps_full)[tp_mask]
+
+    # ── Sous-échantillonnage reproductible ──────────────────────
+    rng      = np.random.default_rng(seed)
+    n_keep   = min(max_samples, n_tp)
+    keep_idx = rng.choice(n_tp, size=n_keep, replace=False)
+
+    records = []
+    for i in keep_idx:
+        records.append({
+            "timestamp":  timestamps_tp[i],
+            "model":      model_name,
+            "attack":     attack_name,
+            "seed":       seed,
+            "success":    bool(success_per_sample[i]),
+            "margin_adv": float(adv_margin_per_sample[i]),
+            "linf":       float(linf_per_sample[i]),
+        })
+    return records
