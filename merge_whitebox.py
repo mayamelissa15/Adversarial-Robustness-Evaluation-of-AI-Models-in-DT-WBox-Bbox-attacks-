@@ -38,6 +38,34 @@ ATTACK_FILES = {
     "C&W":  RESULTS_DIR / f"whitebox_cw_{TAG}.csv",
 }
 
+PERSAMPLE_FILES = {
+    "FGSM": RESULTS_DIR / f"whitebox_persample_fgsm_{TAG}.csv",
+    "PGD":  RESULTS_DIR / f"whitebox_persample_pgd_{TAG}.csv",
+    "C&W":  RESULTS_DIR / f"whitebox_persample_cw_{TAG}.csv",
+}
+
+
+def merge_persample():
+    """Fusionne les 3 CSV par-échantillon (timestamps) s'ils existent."""
+    dfs = []
+    for attack_name, path in PERSAMPLE_FILES.items():
+        if path.exists():
+            dfs.append(pd.read_csv(path))
+            print(f"✓ persample {attack_name:<6} chargé depuis {path}  ({len(dfs[-1])} lignes)")
+
+    if not dfs:
+        print("⚠ Aucun CSV par-échantillon trouvé (timestamps absents ou runners "
+              "pas encore lancés avec timestamps_test.npy présent) — étape ignorée.")
+        return None
+
+    df_persample = pd.concat(dfs, ignore_index=True)
+    df_persample = df_persample.sort_values(["seed", "model", "attack", "timestamp"]).reset_index(drop=True)
+
+    persample_path = RESULTS_DIR / f"whitebox_persample_{TAG}.csv"
+    df_persample.to_csv(persample_path, index=False)
+    print(f"✓ CSV par-échantillon fusionné → {persample_path}  ({len(df_persample)} lignes)")
+    return df_persample
+
 
 def run():
     dfs = []
@@ -88,6 +116,8 @@ def run():
     with open(json_path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"✓ JSON fusionné → {json_path}")
+
+    merge_persample()
 
     return df
 

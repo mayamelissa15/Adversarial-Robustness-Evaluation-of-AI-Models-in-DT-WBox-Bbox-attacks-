@@ -39,6 +39,9 @@ def build_arg_parser(description=""):
                          help="Nombre de seeds")
     parser.add_argument("--fast", action="store_true",
                          help="FAST_MODE : PGD 50x3 au lieu de 200x10, C&W 150 iters")
+    parser.add_argument("--persample_n", default=50, type=int,
+                         help="Nb max de samples gardés par (seed, modèle) dans "
+                              "le CSV par-échantillon (timestamps)")
     return parser
 
 
@@ -125,6 +128,20 @@ def build_per_model_eval(X_test, y_test, victim_w, seed,
     y_atk = y_eval[mask]
 
     return X_eval, y_eval, X_atk, y_atk, idx_ev
+
+
+def load_timestamps(save_dir):
+    """
+    Charge timestamps_test.npy si présent (généré par 00_extract_timestamps.py).
+    Ne plante jamais si absent — retourne juste has_timestamps=False, et les
+    runners doivent alors sauter l'export par-échantillon.
+    """
+    path = save_dir / "timestamps_test.npy"
+    if path.exists():
+        return np.load(path, allow_pickle=True), True
+    print(f"\n⚠ {path} introuvable — export par-échantillon désactivé "
+          f"(lance 00_extract_timestamps.py --dataset <dataset> d'abord).")
+    return None, False
 
 
 def set_all_seeds(seed):

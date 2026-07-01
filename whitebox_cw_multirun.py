@@ -27,15 +27,16 @@ warnings.filterwarnings("ignore")
 
 from common_whitebox import (
     build_arg_parser, setup_paths, get_device, eval_sizes,
-    load_victims, build_per_model_eval, set_all_seeds, VICTIMS_SPEC,
+    load_victims, build_per_model_eval, set_all_seeds, load_timestamps, VICTIMS_SPEC,
 )
-from models import eval_attack
+from models import eval_attack, eval_attack_persample
 from whitebox import cw_mlp, cw_logreg, cw_xgb
 
 ATTACK_NAME = "C&W"
 
 args = build_arg_parser("Whitebox multirun — C&W uniquement").parse_args()
 DATASET, EPS, N_RUNS, FAST = args.dataset, args.eps, args.n_runs, args.fast
+PERSAMPLE_N = args.persample_n
 
 SAVE_DIR, RESULTS_DIR, TAG = setup_paths(DATASET, EPS)
 DEVICE = get_device()
@@ -59,8 +60,10 @@ print(f"{'═'*55}")
 def run():
     X_test, y_test, mlp_w, logreg_w, xgb_w = load_victims(SAVE_DIR, DEVICE)
     victims = {"MLP": mlp_w, "LogReg": logreg_w, "XGBoost": xgb_w}
+    timestamps_test, has_timestamps = load_timestamps(SAVE_DIR)
 
     all_results = []
+    persample_results = []
 
     for seed in SEEDS:
         print(f"\n{'═'*55}")
@@ -97,8 +100,22 @@ def run():
                   f"margin_adv_mean={r.get('margin_adv_mean', float('nan')):.4f}  "
                   f"L∞mean={r.get('linf_mean', float('nan')):.4f}")
 
+            if has_timestamps:
+                timestamps_eval = timestamps_test[idx_ev]
+                records = eval_attack_persample(
+                    vic_w, X_eval, y_eval, X_adv, ATTACK_NAME, vic_name,
+                    timestamps_full=timestamps_eval, threshold=0.45,
+                    max_samples=PERSAMPLE_N, seed=seed,
+                )
+                for rec in records:
+                    rec.update({"eps": EPS, "dataset": DATASET})
+                persample_results.extend(records)
+
         pd.DataFrame(all_results).to_csv(
             RESULTS_DIR / f"whitebox_cw_{TAG}_tmp.csv", index=False)
+        if has_timestamps:
+            pd.DataFrame(persample_results).to_csv(
+                RESULTS_DIR / f"whitebox_persample_cw_{TAG}_tmp.csv", index=False)
         print(f"\n  ✓ Checkpoint seed {seed} sauvegardé")
 
     df = pd.DataFrame(all_results)
@@ -128,6 +145,14 @@ def run():
     with open(json_path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"✓ JSON → {json_path}")
+
+    if has_timestamps and persample_results:
+        df_persample = pd.DataFrame(persample_results)
+        persample_path = RESULTS_DIR / f"whitebox_persample_cw_{TAG}.csv"
+        df_persample.to_csv(persample_path, index=False)
+        print(f"✓ CSV par-échantillon → {persample_path}  ({len(df_persample)} lignes)")
+    else:
+        print("⚠ Pas de CSV par-échantillon produit (timestamps absents).")
 
     return df
 
