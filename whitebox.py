@@ -14,7 +14,7 @@ import sys
 sys.path.append(str(Path(__file__).parent))
 from models import MLP, MLPWrapper, LogRegWrapper, XGBoostWrapper, build_eval_set, eval_attack
 
-
+#pente_approximative = (prédiction(x + ε) - prédiction(x - ε)) / (2ε)  ( pour xgboost)
 # ══════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════
